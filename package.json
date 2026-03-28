@@ -1,0 +1,44 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n next,proxy -c cyan,magenta \"npm run dev:next\" \"npm run dev:proxy\"",
+    "dev:next": "dotenv -e ../../.env -- next dev -p 5173",
+    "dev:proxy": "dotenv -e ../../.env -- node proxy_server.mjs",
+    "build": "dotenv -e ../../.env -- next build",
+    "start": "dotenv -e ../../.env -- next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1",
+    "@vercel/speed-insights": "^2.0.0",
+    "@vitalets/google-translate-api": "^9.2.1",
+    "artplayer": "^5.3.0",
+    "axios": "^1.13.6",
+    "bing-translate-api": "^4.2.0",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "date-fns": "^4.1.0",
+    "express": "^5.2.1",
+    "framer-motion": "^12.36.0",
+    "hls.js": "^1.6.15",
+    "https-proxy-agent": "^8.0.0",
+    "next": "16.1.6",
+    "node-cache": "^5.1.2",
+    "qrcode.react": "^4.2.0",
+    "react": "19.2.3",
+    "react-datepicker": "^9.1.0",
+    "react-dom": "19.2.3",
+    "recharts": "^3.8.1",
+    "sweetalert2": "^11.26.22",
+    "swiper": "^12.1.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "dotenv-cli": "^11.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "^4"
+  }
+}

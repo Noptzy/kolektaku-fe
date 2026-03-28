@@ -1,0 +1,179 @@
+@import "tailwindcss";
+
+/* ─── Theme Variables ──────────────────────────────────────── */
+[data-theme="dark"] {
+  --bg-primary: #0b0b10;
+  --bg-secondary: #12121a;
+  --bg-card: #16161f;
+  --bg-card-hover: #1c1c28;
+  --bg-navbar: rgba(11, 11, 16, 0.8);
+  --bg-input: #16161f;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --text-primary: #f0f0f5;
+  --text-secondary: #9ca3af;
+  --text-tertiary: #6b7280;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-muted: rgba(99, 102, 241, 0.15);
+  --score: #facc15;
+  --badge-bg: rgba(255, 255, 255, 0.06);
+  --badge-text: #d1d5db;
+  --danger: #ef4444;
+  --success: #22c55e;
+  --info: #3b82f6;
+}
+
+[data-theme="light"] {
+  --bg-primary: #f8f9fb;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f3f4f6;
+  --bg-navbar: rgba(255, 255, 255, 0.85);
+  --bg-input: #f3f4f6;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.15);
+  --text-primary: #111827;
+  --text-secondary: #6b7280;
+  --text-tertiary: #9ca3af;
+  --accent: #4f46e5;
+  --accent-hover: #6366f1;
+  --accent-muted: rgba(79, 70, 229, 0.1);
+  --score: #d97706;
+  --badge-bg: rgba(0, 0, 0, 0.05);
+  --badge-text: #374151;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --info: #2563eb;
+}
+
+@theme inline {
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-inter);
+}
+
+/* ─── Base ─────────────────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
+}
+
+/* ─── Utilities ────────────────────────────────────────────── */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-4 {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ─── Custom Animations ────────────────────────────────────── */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.3s ease-out forwards;
+}
+
+/* ─── Swiper Custom Styles ─────────────────────────────────── */
+.homepage-swiper,
+.detail-swiper {
+  position: relative;
+  overflow: hidden;
+}
+
+.homepage-swiper .swiper-button-next,
+.homepage-swiper .swiper-button-prev,
+.detail-swiper .swiper-button-next,
+.detail-swiper .swiper-button-prev {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transition: all 0.2s ease;
+}
+
+.homepage-swiper .swiper-button-next:hover,
+.homepage-swiper .swiper-button-prev:hover,
+.detail-swiper .swiper-button-next:hover,
+.detail-swiper .swiper-button-prev:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.1);
+}
+
+.homepage-swiper .swiper-button-next::after,
+.homepage-swiper .swiper-button-prev::after,
+.detail-swiper .swiper-button-next::after,
+.detail-swiper .swiper-button-prev::after {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.homepage-swiper .swiper-button-next:hover::after,
+.homepage-swiper .swiper-button-prev:hover::after,
+.detail-swiper .swiper-button-next:hover::after,
+.detail-swiper .swiper-button-prev:hover::after {
+  color: white;
+}
+
+.swiper-button-disabled {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+/* ─── ArtPlayer Custom Styles ──────────────────────────────── */
+.art-video-player .art-control-fullscreenWeb {
+  order: 98 !important;
+}
+
+.art-video-player .art-control-fullscreen {
+  order: 99 !important;
+}
+
+@keyframes slideInUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-slide-up {
+  animation: slideInUp 0.5s ease-out forwards;
+}
