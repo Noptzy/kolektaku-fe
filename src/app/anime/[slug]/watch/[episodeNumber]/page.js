@@ -187,7 +187,7 @@ export default function WatchEpisodePage() {
   const generateAiIndonesianTrack = useCallback(async (sourceTrackFile) => {
     try {
       const sourceUrl = sourceTrackFile.startsWith("http")
-        ? `/proxy?url=${encodeURIComponent(sourceTrackFile)}`
+        ? `${PROXY_URL}/proxy?url=${encodeURIComponent(sourceTrackFile)}`
         : sourceTrackFile;
 
       const subtitleResponse = await fetch(sourceUrl);

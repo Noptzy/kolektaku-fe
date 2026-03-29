@@ -79,14 +79,12 @@ function buildSubtitleCSS(style, isMobile = false) {
 const CDN_REFERER_MAP = [
   { pattern: /rapid-cloud\.co|rabbitstream\.net/, referer: "https://rapid-cloud.co/" },
   { pattern: /megacloud\.tv|megacloud\.blog/, referer: "https://megacloud.tv/" },
-  // Dynamic CDN hostnames from megacloud/rapid-cloud ecosystem
-  { pattern: /rainveil\d*\.xyz/, referer: "https://megacloud.tv/" },
-  { pattern: /stormshade\d*\.live/, referer: "https://megacloud.tv/" },
-  { pattern: /sunburst\d*\.live/, referer: "https://megacloud.tv/" },
   { pattern: /cloudflarestorage|bunnycdn/, referer: "https://megacloud.tv/" },
-  // Catch-all for unknown .live/.xyz CDN hosts (likely same ecosystem)
-  { pattern: /\.\w+\d+\.live/, referer: "https://megacloud.tv/" },
-  { pattern: /\.\w+\d+\.xyz/, referer: "https://megacloud.tv/" },
+  // Dynamic CDN hostnames from rapid-cloud ecosystem
+  // These are wildcard subdomains: xxx123.live, xxx123.xyz, etc.
+  { pattern: /\.\w+\d*\.(live|online|xyz|wiki|pro)/, referer: "https://rapid-cloud.co/" },
+  // Fallback for direct CDN domains (haildrop77.pro, frostshine12.wiki, etc.)
+  { pattern: /\.(live|online|xyz|wiki|pro)$/, referer: "https://rapid-cloud.co/" },
 ];
 
 function getRefererForUrl(url) {
@@ -98,36 +96,40 @@ function getRefererForUrl(url) {
 
 const IS_PRODUCTION = typeof window !== "undefined" && !window.location.hostname.includes("localhost");
 
-/** Proxy all HLS requests through same-origin Next.js API route.
- *  CF Workers can't be used for streaming due to CF-to-CF blocking. */
+/** Route all HLS requests through proxy server (VPS with Indonesian IPs). */
 class ProxyLoader extends Hls.DefaultConfig.loader {
   constructor(config) {
     super(config);
-    const load = this.load.bind(this);
-    this.load = (context, config, callbacks) => {
-      const originalUrl = context.url;
+    this._config = config;
+  }
 
-      // YouTube URLs are IP-bound — proxying breaks the signature
-      if (originalUrl.includes("googlevideo.com") || originalUrl.includes("youtube.com")) {
-        load(context, config, callbacks);
-        return;
-      }
+  load(context, config, callbacks) {
+    const url = context.url;
 
-      const proxyUrl = `/proxy?url=${encodeURIComponent(originalUrl)}`;
-      const newContext = { ...context, url: proxyUrl };
-      const newCallbacks = {
-        ...callbacks,
-        onSuccess: (response, stats, ctx) => {
-          response.url = originalUrl;
-          if (ctx) ctx.url = originalUrl;
-          callbacks.onSuccess(response, stats, ctx);
-        },
-        onError: callbacks.onError,
-        onTimeout: callbacks.onTimeout,
-        onProgress: callbacks.onProgress,
-      };
-      load(newContext, config, newCallbacks);
+    // YouTube: skip (breaks signed URLs)
+    if (url.includes("googlevideo.com") || url.includes("youtube.com")) {
+      super.load(context, config, callbacks);
+      return;
+    }
+
+    // Route ALL requests (m3u8 + ts segments) through proxy server
+    // The proxy server handles Referer injection + free proxy rotation
+    const proxyUrl = `${PROXY_URL}/proxy?url=${encodeURIComponent(url)}`;
+    const newContext = { ...context, url: proxyUrl };
+
+    const newCallbacks = {
+      ...callbacks,
+      onSuccess: (response, stats, ctx) => {
+        response.url = url;
+        if (ctx) ctx.url = url;
+        callbacks.onSuccess(response, stats, ctx);
+      },
+      onError: callbacks.onError,
+      onTimeout: callbacks.onTimeout,
+      onProgress: callbacks.onProgress,
     };
+
+    super.load(newContext, config, newCallbacks);
   }
 }
 
@@ -258,13 +260,21 @@ export default function Player({
 
   // ─── HLS Init ───────────────────────────────────────────
   useEffect(() => {
-    if (!src || !videoRef.current) return;
+    if (!videoRef.current) return;
     const video = videoRef.current;
+
+    if (!src) {
+      // No src passed — show placeholder
+      console.warn("[Player] No src provided");
+      return;
+    }
+
     let hls;
 
     lastAppliedStartAtRef.current = -1;
 
     if (src.includes(".m3u8") && Hls.isSupported()) {
+      console.log("[Player] HLS init with src:", src.substring(0, 80));
       hls = new Hls({
         loader: ProxyLoader,
         maxBufferLength: 30,
@@ -275,6 +285,7 @@ export default function Player({
       hlsRef.current = hls;
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        console.log("[Player] MANIFEST_PARSED");
         const MAX_HEIGHT = isPremium ? Infinity : 720;
 
         // Filter levels based on premium status
@@ -299,7 +310,11 @@ export default function Player({
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) console.error("HLS fatal error:", data);
+        if (data.fatal) {
+          console.error("HLS fatal error:", data);
+        } else {
+          console.warn("HLS non-fatal error:", data.details);
+        }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = src;
@@ -366,7 +381,7 @@ export default function Player({
         if (isIndo) setIsSubtitleLoading(true);
 
         const url = activeSub.file.startsWith("http")
-          ? `/proxy?url=${encodeURIComponent(activeSub.file)}`
+          ? `${PROXY_URL}/proxy?url=${encodeURIComponent(activeSub.file)}`
           : activeSub.file;
 
         const res = await fetch(url);
