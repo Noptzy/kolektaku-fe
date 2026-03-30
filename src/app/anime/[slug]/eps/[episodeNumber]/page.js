@@ -770,8 +770,8 @@ export default function EpisodeWatchPage({ params }) {
               )}
 
               {showResumeModal && hlsUrl && (
-                <div className="absolute inset-0 z-[1200] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
-                  <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-2xl">
+                <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
+                  <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-2xl" style={{ animation: 'bounceIn 0.3s ease' }}>
                     <p className="text-sm font-semibold uppercase tracking-wide text-[var(--accent)]">Lanjut Nonton</p>
                     <h3 className="mt-1 text-lg font-bold text-[var(--text-primary)]">Mau lanjut dari menit terakhir?</h3>
                     <p className="mt-2 text-sm text-[var(--text-secondary)]">

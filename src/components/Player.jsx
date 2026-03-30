@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback, useId } from "react";
+import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import Plyr from "plyr";
 import PuffLoader from "react-spinners/PuffLoader";
@@ -195,8 +196,10 @@ export default function Player({
   const [showSkipIntro, setShowSkipIntro] = useState(false);
   const [showSkipOutro, setShowSkipOutro] = useState(false);
 
-  // Controls visibility (tracked from Plyr)
   const [showControls, setShowControls] = useState(true);
+
+  // Portal container for rendering overlays directly into Plyr's video wrapper
+  const [plyrVideoWrapper, setPlyrVideoWrapper] = useState(null);
 
   // Persistence wrapper
   const handleActiveSubChange = useCallback((sub) => {
@@ -350,21 +353,47 @@ export default function Player({
     const MAX_HEIGHT = isPremium ? Infinity : 720;
 
     const initPlyr = (qualityOptions = [], defaultQuality = 720) => {
+      // Re-evaluate the best index rigidly to force Plymouth to respect our initial payload
+      const initTracks = tracksRef.current || [];
+      let initialBestIndex = 0;
+      let initialFallbackTrack = null;
+      if (!userManuallyChangedSubRef.current) {
+        initialFallbackTrack = initTracks.find((t) =>
+          t.label?.toLowerCase().includes("indo") ||
+          t.label?.toLowerCase().includes("indonesia") ||
+          t.lang?.toLowerCase().includes("id") ||
+          t.lang?.toLowerCase().includes("in")
+        );
+        if (!initialFallbackTrack) {
+          const preferredLabel = loadPreferredLang();
+          if (preferredLabel) initialFallbackTrack = initTracks.find((t) => (t.label || t.lang) === preferredLabel);
+        }
+        if (initialFallbackTrack) {
+          const foundIdx = initTracks.findIndex((t) => t.file === initialFallbackTrack.file);
+          if (foundIdx !== -1) initialBestIndex = foundIdx;
+        }
+      } else if (activeSub) {
+        const foundIdx = initTracks.findIndex((t) => t.file === activeSub.file);
+        if (foundIdx !== -1) initialBestIndex = foundIdx;
+      }
+
+      const bestLangISO = initTracks[initialBestIndex]?.lang || 'id';
+
       // Ensure track elements are present on video before Plyr init
-      const currentTracks = tracksRef.current || [];
-      if (currentTracks.length > 0 && !video.querySelector('track')) {
+      const currentTracksData = tracksRef.current || [];
+      if (currentTracksData.length > 0 && !video.querySelector('track')) {
         if (!dummyVttUrlRef.current) {
           const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:00.001\n \n';
           const blob = new Blob([vtt], { type: 'text/vtt' });
           dummyVttUrlRef.current = URL.createObjectURL(blob);
         }
-        currentTracks.forEach((t, i) => {
+        currentTracksData.forEach((t, i) => {
           const trackEl = document.createElement('track');
           trackEl.kind = 'captions';
           trackEl.label = t.label || `Track ${i + 1}`;
           trackEl.srclang = t.lang || `lang${i}`;
           trackEl.src = dummyVttUrlRef.current;
-          if (i === 0) trackEl.default = true;
+          trackEl.default = (i === initialBestIndex);
           video.appendChild(trackEl);
         });
       }
@@ -381,6 +410,7 @@ export default function Player({
           'mute',
           'volume',
           'settings',
+          'pip',
           'fullscreen',
         ],
         settings: ['captions', 'quality', 'speed'],
@@ -388,6 +418,9 @@ export default function Player({
         speed: {
           selected: 1,
           options: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2],
+        },
+        i18n: {
+          qualityLabel: { 0: 'Auto' },
         },
         quality: qualityOptions.length > 0 ? {
           default: defaultQuality,
@@ -410,7 +443,7 @@ export default function Player({
         } : {},
         keyboard: { focused: true, global: true },
         tooltips: { controls: true, seek: true },
-        captions: { active: true, language: 'auto', update: true },
+        captions: { active: true, language: bestLangISO, update: true },
         fullscreen: { enabled: true, fallback: true, iosNative: false, container: `#kol-player-${playerId.replace(/:/g, '')}` },
         clickToPlay: true,
         hideControls: true,
@@ -420,6 +453,13 @@ export default function Player({
       });
 
       plyrRef.current = player;
+
+      // Extract video wrapper for portal rendering
+      setTimeout(() => {
+        if (containerRef.current) {
+          setPlyrVideoWrapper(containerRef.current.querySelector('.plyr__video-wrapper'));
+        }
+      }, 50);
 
       // Plyr events
       player.on('play', () => { setPlaying(true); setIsVideoLoading(false); });
@@ -702,52 +742,7 @@ export default function Player({
     return () => clearInterval(interval);
   }, [intro, outro, subCues.length]);
 
-  // Render Intro/Outro regions on timeline
-  useEffect(() => {
-    if (!duration || !containerRef.current) return;
 
-    const progressEl = containerRef.current.querySelector('.plyr__progress');
-    if (!progressEl) return;
-
-    // Remove existing custom highlights
-    progressEl.querySelectorAll('.kol-timeline-region').forEach(e => e.remove());
-
-    const addRegion = (start, end, type) => {
-      if (typeof start !== 'number' || typeof end !== 'number' || end <= start) return;
-      
-      const leftPct = Math.max(0, Math.min(100, (start / duration) * 100));
-      const widthPct = Math.max(0, Math.min(100 - leftPct, ((end - start) / duration) * 100));
-
-      const el = document.createElement('div');
-      el.className = `kol-timeline-region kol-region-${type}`;
-
-      el.style.position = 'absolute';
-      el.style.top = '50%';
-      el.style.transform = 'translateY(-50%)';
-      el.style.height = '14px'; // Cover the track area natively
-      el.style.left = `${leftPct}%`;
-      el.style.width = `${widthPct}%`;
-      el.style.backgroundColor = 'rgba(236, 72, 153, 0.4)'; // Theme pink with opacity
-      el.style.borderLeft = '2px solid #ec4899';
-      el.style.borderRight = '2px solid #ec4899';
-      el.style.pointerEvents = 'none';
-      el.style.zIndex = '2';
-      el.style.borderRadius = '2px';
-      el.title = `Langsung skip ${type}`;
-      
-      progressEl.appendChild(el);
-    };
-
-    if (intro) addRegion(intro.start, intro.end, 'intro');
-    if (outro) addRegion(outro.start, outro.end, 'outro');
-
-    // Elevate the range input thumb so it stays visible/clickable over the highlights
-    const rangeInput = progressEl.querySelector('input[type="range"]');
-    if (rangeInput) {
-      rangeInput.style.zIndex = '3';
-      rangeInput.style.position = 'relative';
-    }
-  }, [duration, intro, outro]);
 
   // Translation gating
   useEffect(() => {
@@ -794,37 +789,7 @@ export default function Player({
         preload="auto"
       />
 
-      {/* Video Loading Indicator (Library) */}
-      {isVideoLoading && !waitingForTranslation && (
-        <div style={{
-          position: "absolute", top: "50%", left: "50%", 
-          transform: "translate(-50%, -50%)",
-          zIndex: 5, pointerEvents: "none"
-        }}>
-          <PuffLoader color="var(--accent, #ec4899)" size={100} />
-        </div>
-      )}
 
-      {/* Custom Subtitles Overlay (on top of Plyr) */}
-      {currentCueText && !waitingForTranslation && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: showControls ? "72px" : "24px",
-            left: 0, right: 0,
-            display: "flex", justifyContent: "center",
-            padding: "0 24px",
-            transition: "bottom 0.3s ease",
-            pointerEvents: "none",
-            zIndex: 100,
-          }}
-        >
-          <span
-            style={subCSS}
-            dangerouslySetInnerHTML={{ __html: currentCueText.replace(/\n/g, "<br/>") }}
-          />
-        </div>
-      )}
 
       {/* Skip Intro Button */}
       {showSkipIntro && (
@@ -832,7 +797,7 @@ export default function Player({
           onClick={(e) => { e.stopPropagation(); if (videoRef.current && intro) videoRef.current.currentTime = intro.end; }}
           style={{
             position: "absolute", bottom: showControls ? "80px" : "30px", right: "20px",
-            zIndex: 110, padding: "8px 20px", borderRadius: "8px",
+            zIndex: 5, padding: "8px 20px", borderRadius: "8px",
             background: "rgba(236,72,153,0.85)", backdropFilter: "blur(8px)",
             color: "#fff", border: "1px solid rgba(255,255,255,0.2)",
             fontSize: "13px", fontWeight: 700, cursor: "pointer",
@@ -844,12 +809,12 @@ export default function Player({
       )}
 
       {/* Skip Outro / Next Episode Button */}
-      {showSkipOutro && (
+      {showSkipOutro && onNextEpisode && (
         <button
-          onClick={(e) => { e.stopPropagation(); if (onNextEpisode) onNextEpisode(); }}
+          onClick={(e) => { e.stopPropagation(); onNextEpisode(); }}
           style={{
             position: "absolute", bottom: showControls ? "80px" : "30px", right: "20px",
-            zIndex: 110, padding: "8px 20px", borderRadius: "8px",
+            zIndex: 5, padding: "8px 20px", borderRadius: "8px",
             background: "rgba(99,102,241,0.85)", backdropFilter: "blur(8px)",
             color: "#fff", border: "1px solid rgba(255,255,255,0.2)",
             fontSize: "13px", fontWeight: 700, cursor: "pointer",
@@ -860,32 +825,24 @@ export default function Player({
         </button>
       )}
 
-      {/* Premium Translation Overlay */}
+      {/* ─── WAITING FOR TRANSLATION OVERLAY ─── */}
       {waitingForTranslation && (
         <div style={{
-          position: "absolute", inset: 0, zIndex: 999,
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          position: "absolute", zIndex: 6, inset: 0,
           background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", gap: "24px",
-          transition: "all 0.4s ease",
+          transition: "all 0.4s ease", display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center"
         }}>
           <PuffLoader color="var(--accent, #ec4899)" size={100} />
 
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", textAlign: "center" }}>
             <h3 style={{
-              margin: 0, fontFamily: "'Outfit', sans-serif", fontSize: "24px", fontWeight: 800,
-              background: "linear-gradient(to right, #ec4899, #6366f1)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-              letterSpacing: "0.1em", textTransform: "uppercase"
-            }}>
-              Kolektaku AI
-            </h3>
+              fontSize: "18px", fontWeight: "700", color: "#fff", margin: 0, letterSpacing: "1px"
+            }}>KOLEKTAKU AI</h3>
             <p style={{
-              margin: 0, fontSize: "14px", color: "rgba(255,255,255,0.6)",
-              letterSpacing: "0.05em", fontWeight: 500,
-              display: "flex", alignItems: "center", gap: "8px"
+              color: "rgba(255,255,255,0.7)", fontSize: "14px", fontWeight: "500", margin: 0
             }}>
-              <span className="dot-animate">●</span>
-              {isSubtitleLoading ? "Menyiapkan Terjemahan Indonesia..." : "Menyeleraskan Alur Video..."}
-              <span className="dot-animate" style={{ animationDelay: "0.2s" }}>●</span>
+              <span className="dot-animate">●</span> Menyelaraskan Alur Video... <span className="dot-animate">●</span>
             </p>
           </div>
 
@@ -897,7 +854,45 @@ export default function Player({
         </div>
       )}
 
+      {/* Video Loading Indicator & Subtitles Portalled Inside Plyr Video Wrapper */}
+      {plyrVideoWrapper && createPortal(
+        <>
+          {isVideoLoading && !waitingForTranslation && (
+            <div style={{
+              position: "absolute", top: "50%", left: "50%", 
+              transform: "translate(-50%, -50%)",
+              zIndex: 3, pointerEvents: "none"
+            }}>
+              <PuffLoader color="var(--accent, #ec4899)" size={100} />
+            </div>
+          )}
 
+          {currentCueText && !waitingForTranslation && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: showControls
+                  ? (isMobile ? (isFullscreen ? "50px" : "44px") : "56px")
+                  : (isMobile ? (isFullscreen ? "12px" : "6px") : "12px"),
+                left: 0,
+                right: 0,
+                display: "flex",
+                justifyContent: "center",
+                padding: "0 16px",
+                zIndex: 2,
+                pointerEvents: "none",
+                transition: "bottom 0.25s ease"
+              }}
+            >
+              <span
+                style={subCSS}
+                dangerouslySetInnerHTML={{ __html: currentCueText.replace(/\n/g, "<br/>") }}
+              />
+            </div>
+          )}
+        </>,
+        plyrVideoWrapper
+      )}
 
       {/* CSS Animations & Plyr Theme Override */}
       <style>{`
@@ -976,6 +971,19 @@ export default function Player({
           display: none !important;
         }
 
+        @media (max-width: 768px) {
+          /* Hide forward/rewind on mobile when not fullscreen */
+          .kol-player-wrapper .plyr:not(.plyr--fullscreen-active) .plyr__controls [data-plyr="fast-forward"],
+          .kol-player-wrapper .plyr:not(.plyr--fullscreen-active) .plyr__controls [data-plyr="rewind"] {
+            display: none !important;
+          }
+
+          /* Hide volume totally on mobile when not fullscreen (mobile uses hardware keys) */
+          .kol-player-wrapper .plyr:not(.plyr--fullscreen-active) .plyr__volume {
+            display: none !important;
+          }
+        }
+
         /* Hide TRACK badges in captions menu */
         .kol-player-wrapper .plyr__menu__container .plyr__menu__value {
           display: none !important;
@@ -1004,6 +1012,12 @@ export default function Player({
         .kol-player-wrapper.plyr--fullscreen-active .plyr {
           height: 100%;
           width: 100%;
+        }
+
+        /* Ensure portal children can position inside the video wrapper */
+        .kol-player-wrapper .plyr__video-wrapper {
+          position: relative;
+          z-index: 0;
         }
 
         /* Hide Plyr's native captions since we handle subtitles custom */
