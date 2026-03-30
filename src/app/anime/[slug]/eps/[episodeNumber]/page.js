@@ -864,7 +864,7 @@ export default function EpisodeWatchPage({ params }) {
                   <p className="text-xs font-semibold text-[var(--text-primary)]">
                     Masuk mode{" "}
                     <span className="text-[var(--accent)]">Fullscreen</span>{" "}
-                    untuk mengatur gaya subtitle
+                    untuk mengatur pilihan subtitle
                   </p>
                 </div>
               </div>

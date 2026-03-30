@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useId } from "react";
 import Hls from "hls.js";
+import Plyr from "plyr";
+import PuffLoader from "react-spinners/PuffLoader";
+import "plyr/dist/plyr.css";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:3002";
 const SUBTITLE_STYLE_KEY = "kolektaku_subtitle_style";
@@ -17,15 +20,6 @@ const DEFAULT_SUBTITLE_STYLE = {
   bgOpacity: "0",
 };
 
-const FONT_OPTIONS = [
-  { label: "Inter (Default)", value: "Inter, sans-serif" },
-  { label: "Outfit", value: "Outfit, sans-serif" },
-  { label: "Roboto", value: "Roboto, sans-serif" },
-  { label: "Poppins", value: "Poppins, sans-serif" },
-  { label: "Noto Sans", value: "'Noto Sans', sans-serif" },
-  { label: "Monospace", value: "monospace" },
-];
-
 const OUTLINE_PRESETS = {
   none: "none",
   soft: "-1px -1px 0 rgba(0,0,0,0.5), 1px -1px 0 rgba(0,0,0,0.5), -1px 1px 0 rgba(0,0,0,0.5), 1px 1px 0 rgba(0,0,0,0.5)",
@@ -40,10 +34,6 @@ function loadSubtitleStyle() {
   } catch {
     return DEFAULT_SUBTITLE_STYLE;
   }
-}
-
-function saveSubtitleStyle(style) {
-  try { localStorage.setItem(SUBTITLE_STYLE_KEY, JSON.stringify(style)); } catch { }
 }
 
 function loadPreferredLang() {
@@ -80,10 +70,7 @@ const CDN_REFERER_MAP = [
   { pattern: /rapid-cloud\.co|rabbitstream\.net/, referer: "https://rapid-cloud.co/" },
   { pattern: /megacloud\.tv|megacloud\.blog/, referer: "https://megacloud.tv/" },
   { pattern: /cloudflarestorage|bunnycdn/, referer: "https://megacloud.tv/" },
-  // Dynamic CDN hostnames from rapid-cloud ecosystem
-  // These are wildcard subdomains: xxx123.live, xxx123.xyz, etc.
   { pattern: /\.\w+\d*\.(live|online|xyz|wiki|pro)/, referer: "https://rapid-cloud.co/" },
-  // Fallback for direct CDN domains (haildrop77.pro, frostshine12.wiki, etc.)
   { pattern: /\.(live|online|xyz|wiki|pro)$/, referer: "https://rapid-cloud.co/" },
 ];
 
@@ -91,7 +78,7 @@ function getRefererForUrl(url) {
   for (const { pattern, referer } of CDN_REFERER_MAP) {
     if (pattern.test(url)) return referer;
   }
-  return "https://megacloud.tv/"; // Default to megacloud instead of null
+  return "https://megacloud.tv/";
 }
 
 const IS_PRODUCTION = typeof window !== "undefined" && !window.location.hostname.includes("localhost");
@@ -106,14 +93,11 @@ class ProxyLoader extends Hls.DefaultConfig.loader {
   load(context, config, callbacks) {
     const url = context.url;
 
-    // YouTube: skip (breaks signed URLs)
     if (url.includes("googlevideo.com") || url.includes("youtube.com")) {
       super.load(context, config, callbacks);
       return;
     }
 
-    // Route ALL requests (m3u8 + ts segments) through proxy server
-    // The proxy server handles Referer injection + free proxy rotation
     const proxyUrl = `${PROXY_URL}/proxy?url=${encodeURIComponent(url)}`;
     const newContext = { ...context, url: proxyUrl };
 
@@ -165,16 +149,6 @@ function parseTimestamp(ts) {
   return parseFloat(ts.replace(",", "."));
 }
 
-function formatTime(s) {
-  if (isNaN(s) || !isFinite(s)) return "0:00";
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  return h > 0
-    ? `${h}:${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`
-    : `${m}:${sec.toString().padStart(2, "0")}`;
-}
-
 export default function Player({
   src,
   tracks = [],
@@ -187,47 +161,42 @@ export default function Player({
   isPremium = false,
   startAtSeconds = 0,
 }) {
+  const playerId = useId();
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const hlsRef = useRef(null);
-  const hideTimerRef = useRef(null);
-  const seekingRef = useRef(false);
+  const plyrRef = useRef(null);
+  const tracksRef = useRef(tracks);
   const waitingRef = useRef(waitingForTranslation);
-  const lastClickTimeRef = useRef(0);
-  const clickTimerRef = useRef(null);
   const lastAppliedStartAtRef = useRef(-1);
+  const dummyVttUrlRef = useRef(null);
+  const subInitializedRef = useRef(false);
+  const isProgrammaticChangeRef = useRef(false);
+  const userManuallyChangedSubRef = useRef(false);
+  const systemPauseRef = useRef(false);
+  const isRebuildingTracksRef = useRef(false);
 
   // State
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [buffered, setBuffered] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
-  const [showControls, setShowControls] = useState(true);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
   const [isMobile, setIsMobile] = useState(false);
-  const [isBuffering, setIsBuffering] = useState(false);
-
-  // Quality
-  const [qualities, setQualities] = useState([]);
-  const [currentQuality, setCurrentQuality] = useState(-1);
-  const [showQualityMenu, setShowQualityMenu] = useState(false);
-  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Subtitles
   const [subStyle, setSubStyle] = useState(DEFAULT_SUBTITLE_STYLE);
-  const [showStylePanel, setShowStylePanel] = useState(false);
   const [activeSub, setActiveSub] = useState(null);
   const [subCues, setSubCues] = useState([]);
   const [currentCueText, setCurrentCueText] = useState("");
-  const [showSubMenu, setShowSubMenu] = useState(false);
   const [isSubtitleLoading, setIsSubtitleLoading] = useState(false);
+  const [isVideoLoading, setIsVideoLoading] = useState(true);
 
   // Skip
   const [showSkipIntro, setShowSkipIntro] = useState(false);
   const [showSkipOutro, setShowSkipOutro] = useState(false);
+
+  // Controls visibility (tracked from Plyr)
+  const [showControls, setShowControls] = useState(true);
 
   // Persistence wrapper
   const handleActiveSubChange = useCallback((sub) => {
@@ -247,38 +216,285 @@ export default function Player({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  // Keep ref in sync
+  // Keep refs in sync
   useEffect(() => { waitingRef.current = waitingForTranslation; }, [waitingForTranslation]);
+  useEffect(() => { tracksRef.current = tracks; }, [tracks]);
 
-  const updateStyle = useCallback((key, value) => {
-    setSubStyle((prev) => {
-      const next = { ...prev, [key]: value };
-      saveSubtitleStyle(next);
-      return next;
+  // ─── Inject <track> elements into video DOM for Plyr ─────────
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // Remove existing tracks
+    const existing = video.querySelectorAll('track');
+    existing.forEach((t) => t.remove());
+
+    if (tracks.length === 0) return;
+
+    // Create a minimal valid VTT blob (Plyr needs valid src to detect tracks)
+    if (!dummyVttUrlRef.current) {
+      const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:00.001\n \n';
+      const blob = new Blob([vtt], { type: 'text/vtt' });
+      dummyVttUrlRef.current = URL.createObjectURL(blob);
+    }
+
+    // Determine the best track to select natively BEFORE Plymouth processes DOM
+    let bestIndex = 0;
+    let fallbackTrack = null;
+
+    if (!userManuallyChangedSubRef.current) {
+      // 1. Try to find Indonesian track (Primary Focus)
+      fallbackTrack = tracks.find((t) =>
+        t.label?.toLowerCase().includes("indo") ||
+        t.label?.toLowerCase().includes("indonesia") ||
+        t.lang?.toLowerCase().includes("id") ||
+        t.lang?.toLowerCase().includes("in")
+      );
+
+      // 2. Fallback to user preferred language from localStorage
+      if (!fallbackTrack) {
+        const preferredLabel = loadPreferredLang();
+        if (preferredLabel) {
+          fallbackTrack = tracks.find((t) => (t.label || t.lang) === preferredLabel);
+        }
+      }
+
+      // Resolve the index
+      if (fallbackTrack) {
+        const foundIdx = tracks.findIndex((t) => t.file === fallbackTrack.file);
+        if (foundIdx !== -1) bestIndex = foundIdx;
+      }
+    } else if (activeSub) {
+      // Retain the user's manual choice even across track mutations
+      const foundIdx = tracks.findIndex((t) => t.file === activeSub.file);
+      if (foundIdx !== -1) bestIndex = foundIdx;
+    }
+
+    tracks.forEach((t, i) => {
+      const trackEl = document.createElement('track');
+      trackEl.kind = 'captions';
+      trackEl.label = t.label || `Track ${i + 1}`;
+      trackEl.srclang = t.lang || `lang${i}`;
+      trackEl.src = dummyVttUrlRef.current;
+      trackEl.default = (i === bestIndex); // Native HTML5 marker for Plymouth initialization
+      video.appendChild(trackEl);
     });
+
+    // If Plyr is already initialized, force captions update securely
+    if (plyrRef.current) {
+      try {
+        isRebuildingTracksRef.current = true;
+        // Cycle Plymouth's interface to register new tracks, then force the track selection once fully initialized
+        plyrRef.current.captions.active = false;
+        setTimeout(() => {
+          if (plyrRef.current) {
+            plyrRef.current.captions.active = true;
+            
+            // Allow Plymouth native event loop to clear before we forcefully assign our track
+            setTimeout(() => {
+              if (plyrRef.current) {
+                plyrRef.current.currentTrack = bestIndex;
+                handleActiveSubChange(tracks[bestIndex]); // Sync custom UI state
+              }
+              isRebuildingTracksRef.current = false;
+            }, 100);
+          } else {
+            isRebuildingTracksRef.current = false;
+          }
+        }, 50);
+      } catch (e) {
+        isRebuildingTracksRef.current = false;
+        console.warn('[Player] Failed to refresh Plyr captions:', e);
+      }
+    } else {
+      // Player is not yet fully instantiated. The activeSub will be hooked properly by initial default track selection.
+      handleActiveSubChange(tracks[bestIndex]);
+    }
+
+    return () => {
+      // Don't revoke dummyVttUrl here — it's shared and cleaned up on unmount
+    };
+  }, [tracks]);
+
+  // Cleanup dummy VTT blob on unmount
+  useEffect(() => {
+    return () => {
+      if (dummyVttUrlRef.current) {
+        URL.revokeObjectURL(dummyVttUrlRef.current);
+        dummyVttUrlRef.current = null;
+      }
+    };
   }, []);
 
-  // ─── HLS Init ───────────────────────────────────────────
+  // ─── HLS + Plyr Init ───────────────────────────────────────────
   useEffect(() => {
     if (!videoRef.current) return;
     const video = videoRef.current;
 
     if (!src) {
-      // No src passed — show placeholder
       console.warn("[Player] No src provided");
       return;
     }
 
     let hls;
+    let player;
 
     lastAppliedStartAtRef.current = -1;
 
+    // Destroy previous Plyr instance
+    if (plyrRef.current) {
+      plyrRef.current.destroy();
+      plyrRef.current = null;
+    }
+
+    const MAX_HEIGHT = isPremium ? Infinity : 720;
+
+    const initPlyr = (qualityOptions = [], defaultQuality = 720) => {
+      // Ensure track elements are present on video before Plyr init
+      const currentTracks = tracksRef.current || [];
+      if (currentTracks.length > 0 && !video.querySelector('track')) {
+        if (!dummyVttUrlRef.current) {
+          const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:00.001\n \n';
+          const blob = new Blob([vtt], { type: 'text/vtt' });
+          dummyVttUrlRef.current = URL.createObjectURL(blob);
+        }
+        currentTracks.forEach((t, i) => {
+          const trackEl = document.createElement('track');
+          trackEl.kind = 'captions';
+          trackEl.label = t.label || `Track ${i + 1}`;
+          trackEl.srclang = t.lang || `lang${i}`;
+          trackEl.src = dummyVttUrlRef.current;
+          if (i === 0) trackEl.default = true;
+          video.appendChild(trackEl);
+        });
+      }
+
+      player = new Plyr(video, {
+        controls: [
+          'play-large',
+          'rewind',
+          'play',
+          'fast-forward',
+          'progress',
+          'current-time',
+          'duration',
+          'mute',
+          'volume',
+          'settings',
+          'fullscreen',
+        ],
+        settings: ['captions', 'quality', 'speed'],
+        seekTime: 10,
+        speed: {
+          selected: 1,
+          options: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2],
+        },
+        quality: qualityOptions.length > 0 ? {
+          default: defaultQuality,
+          options: qualityOptions,
+          forced: true,
+          onChange: (quality) => {
+            if (hlsRef.current) {
+              if (quality === 0) {
+                // Auto
+                hlsRef.current.currentLevel = -1;
+              } else {
+                hlsRef.current.levels.forEach((level, index) => {
+                  if (level.height === quality) {
+                    hlsRef.current.currentLevel = index;
+                  }
+                });
+              }
+            }
+          },
+        } : {},
+        keyboard: { focused: true, global: true },
+        tooltips: { controls: true, seek: true },
+        captions: { active: true, language: 'auto', update: true },
+        fullscreen: { enabled: true, fallback: true, iosNative: false, container: `#kol-player-${playerId.replace(/:/g, '')}` },
+        clickToPlay: true,
+        hideControls: true,
+        disableContextMenu: true,
+        ratio: '16:9',
+        storage: { enabled: true, key: 'kolektaku_plyr' },
+      });
+
+      plyrRef.current = player;
+
+      // Plyr events
+      player.on('play', () => { setPlaying(true); setIsVideoLoading(false); });
+      player.on('playing', () => setIsVideoLoading(false));
+      player.on('waiting', () => setIsVideoLoading(true));
+      player.on('canplay', () => setIsVideoLoading(false));
+      player.on('error', () => setIsVideoLoading(false));
+      player.on('pause', () => {
+        if (systemPauseRef.current) {
+          systemPauseRef.current = false;
+        } else {
+          setPlaying(false);
+        }
+      });
+      player.on('ended', () => {
+        setPlaying(false);
+        if (onEnded) onEnded(video.currentTime, video.duration);
+      });
+      player.on('timeupdate', () => {
+        const t = video.currentTime;
+        setCurrentTime(t);
+        setDuration(video.duration || 0);
+        if (onTimeUpdate) onTimeUpdate(t, video.duration);
+
+        // Update current subtitle cue
+        // We use the latest subCues from the ref-like state
+        // but since this is in the init, we rely on the separate effect below
+      });
+      player.on('enterfullscreen', () => setIsFullscreen(true));
+      player.on('exitfullscreen', () => setIsFullscreen(false));
+      player.on('controlsshown', () => setShowControls(true));
+      player.on('controlshidden', () => setShowControls(false));
+
+      // Sync Plyr caption selection → our custom subtitle system
+      player.on('languagechange', () => {
+        if (isRebuildingTracksRef.current) return;
+
+        if (!isProgrammaticChangeRef.current) {
+          userManuallyChangedSubRef.current = true;
+        } else {
+          isProgrammaticChangeRef.current = false;
+        }
+
+        const currentTracks = tracksRef.current;
+        const idx = player.currentTrack;
+        if (idx === -1 || !currentTracks || idx >= currentTracks.length) {
+          // Captions turned off
+          handleActiveSubChange(null);
+        } else {
+          handleActiveSubChange(currentTracks[idx]);
+        }
+      });
+
+      player.on('captionsenabled', () => {
+        if (isRebuildingTracksRef.current) return;
+        const currentTracks = tracksRef.current;
+        const idx = player.currentTrack;
+        if (idx >= 0 && currentTracks && idx < currentTracks.length) {
+          handleActiveSubChange(currentTracks[idx]);
+        }
+      });
+
+      player.on('captionsdisabled', () => {
+        if (isRebuildingTracksRef.current) return;
+        handleActiveSubChange(null);
+      });
+    };
+
     if (src.includes(".m3u8") && Hls.isSupported()) {
-      console.log("[Player] HLS init with src:", src.substring(0, 80));
+      console.log("[Player] HLS + Plyr init with src:", src.substring(0, 80));
       hls = new Hls({
         loader: ProxyLoader,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+        maxBufferHole: 0.5,
       });
       hls.loadSource(src);
       hls.attachMedia(video);
@@ -286,48 +502,73 @@ export default function Player({
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         console.log("[Player] MANIFEST_PARSED");
-        const MAX_HEIGHT = isPremium ? Infinity : 720;
 
-        // Filter levels based on premium status
-        const q = hls.levels
-          .map((level, index) => ({
-            label: level.height + "P",
-            level: index,
-            height: level.height,
-          }))
-          .filter((q) => q.height <= MAX_HEIGHT);
+        // Get available qualities filtered by premium
+        const qualityOptions = hls.levels
+          .map((level) => level.height)
+          .filter((h) => h <= MAX_HEIGHT)
+          .filter((v, i, a) => a.indexOf(v) === i) // unique
+          .sort((a, b) => b - a); // descending
 
-        q.unshift({ label: "Auto", level: -1 });
-        setQualities(q);
+        // Add "Auto" as 0
+        qualityOptions.push(0);
 
-        // Enforce capping for auto-resolution
+        // Enforce capping for non-premium
         if (!isPremium) {
           const maxLevelIndex = hls.levels.reduce((acc, level, index) => {
             return level.height <= 720 ? index : acc;
           }, -1);
           hls.autoLevelCapping = maxLevelIndex;
         }
+
+        const defaultQuality = qualityOptions.includes(720) ? 720 : qualityOptions[0];
+        initPlyr(qualityOptions, defaultQuality);
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
           console.error("HLS fatal error:", data);
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              // Try to recover network error
+              console.log("fatal network error encountered, try to recover");
+              hls.startLoad();
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              console.log("fatal media error encountered, try to recover");
+              hls.recoverMediaError();
+              break;
+            default:
+              // Cannot recover
+              hls.destroy();
+              break;
+          }
         } else {
-          console.warn("HLS non-fatal error:", data.details);
+          // Suppress benign bufferStalledError from cluttering console, 
+          // HLS.js handles this internally and recovers automatically.
+          if (data.details !== Hls.ErrorDetails.BUFFER_STALLED_ERROR && data.details !== 'bufferStalledError') {
+            console.warn("HLS non-fatal error:", data.details);
+          }
         }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Native HLS (Safari)
       video.src = src;
+      initPlyr();
     } else {
       video.src = src;
+      initPlyr();
     }
 
     return () => {
       if (hls) hls.destroy();
       hlsRef.current = null;
+      if (player) player.destroy();
+      plyrRef.current = null;
     };
   }, [src, isPremium]);
 
+  // ─── Start at specific time ──────────────────────────────────
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -335,9 +576,7 @@ export default function Player({
     const parsedStart = Number(startAtSeconds);
     const targetSecond = Number.isFinite(parsedStart) ? Math.max(0, Math.floor(parsedStart)) : 0;
 
-    if (targetSecond === lastAppliedStartAtRef.current) {
-      return;
-    }
+    if (targetSecond === lastAppliedStartAtRef.current) return;
 
     const applyStartAt = () => {
       const mediaDuration = Number.isFinite(video.duration) ? Math.floor(video.duration) : 0;
@@ -387,12 +626,11 @@ export default function Player({
         const res = await fetch(url);
         const text = await res.text();
 
-        // If it's AI translation, it might return empty or "translating" status if not ready
         const cues = parseVTT(text);
 
         if (cues.length === 0 && retryCount < maxRetries && !cancelled) {
           retryCount++;
-          setTimeout(loadSub, 2000); // Wait 2s and retry
+          setTimeout(loadSub, 2000);
           return;
         }
 
@@ -410,46 +648,18 @@ export default function Player({
     return () => { cancelled = true; };
   }, [activeSub]);
 
-  // Auto-select subtitle based on preference or Indonesian default
-  useEffect(() => {
-    if (tracks.length > 0 && !activeSub) {
-      const preferredLabel = loadPreferredLang();
-      let selected = null;
 
-      if (preferredLabel) {
-        selected = tracks.find((t) => (t.label || t.lang) === preferredLabel);
-      }
 
-      if (!selected) {
-        // Fallback: Indonesian
-        selected = tracks.find((t) =>
-        (t.label?.toLowerCase().includes("indo") ||
-          t.label?.toLowerCase().includes("indonesia") ||
-          t.lang?.toLowerCase().includes("id") ||
-          t.lang?.toLowerCase().includes("in"))
-        );
-      }
-
-      const def = selected || tracks.find((t) => t.default) || tracks[0];
-      setActiveSub(def);
-    }
-  }, [tracks, activeSub]);
-
-  // ─── Video event listeners ──────────────────────────────
+  // ─── Subtitle cue sync (runs on timeupdate via interval) ──────────
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || subCues.length === 0) {
+      setCurrentCueText("");
+      return;
+    }
 
-    video.volume = 1; // Force 100% volume on load
-
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
-    const onTimeupdate = () => {
+    const interval = setInterval(() => {
       const t = video.currentTime;
-      setCurrentTime(t);
-      if (onTimeUpdate) onTimeUpdate(t, video.duration);
-
-      // Update current cue
       const cue = subCues.find((c) => t >= c.start && t <= c.end);
       setCurrentCueText(cue ? cue.text : "");
 
@@ -464,182 +674,94 @@ export default function Player({
         setShowSkipIntro(false);
         setShowSkipOutro(false);
       }
-    };
-    const onDurationChange = () => setDuration(video.duration);
-    const onProgress = () => {
-      if (video.buffered.length > 0) {
-        setBuffered(video.buffered.end(video.buffered.length - 1));
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [subCues, intro, outro]);
+
+  // ─── Intro/outro tracking (when no subtitles) ───────────────────
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || subCues.length > 0) return; // handled above
+    if (!intro && !outro) return;
+
+    const interval = setInterval(() => {
+      const t = video.currentTime;
+      if (intro && t >= intro.start && t <= intro.end) {
+        setShowSkipIntro(true);
+        setShowSkipOutro(false);
+      } else if (outro && t >= outro.start && t <= outro.end) {
+        setShowSkipIntro(false);
+        setShowSkipOutro(true);
+      } else {
+        setShowSkipIntro(false);
+        setShowSkipOutro(false);
       }
-    };
-    const onVolumeChange = () => {
-      setVolume(video.volume);
-      setMuted(video.muted);
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [intro, outro, subCues.length]);
+
+  // Render Intro/Outro regions on timeline
+  useEffect(() => {
+    if (!duration || !containerRef.current) return;
+
+    const progressEl = containerRef.current.querySelector('.plyr__progress');
+    if (!progressEl) return;
+
+    // Remove existing custom highlights
+    progressEl.querySelectorAll('.kol-timeline-region').forEach(e => e.remove());
+
+    const addRegion = (start, end, type) => {
+      if (typeof start !== 'number' || typeof end !== 'number' || end <= start) return;
+      
+      const leftPct = Math.max(0, Math.min(100, (start / duration) * 100));
+      const widthPct = Math.max(0, Math.min(100 - leftPct, ((end - start) / duration) * 100));
+
+      const el = document.createElement('div');
+      el.className = `kol-timeline-region kol-region-${type}`;
+
+      el.style.position = 'absolute';
+      el.style.top = '50%';
+      el.style.transform = 'translateY(-50%)';
+      el.style.height = '14px'; // Cover the track area natively
+      el.style.left = `${leftPct}%`;
+      el.style.width = `${widthPct}%`;
+      el.style.backgroundColor = 'rgba(236, 72, 153, 0.4)'; // Theme pink with opacity
+      el.style.borderLeft = '2px solid #ec4899';
+      el.style.borderRight = '2px solid #ec4899';
+      el.style.pointerEvents = 'none';
+      el.style.zIndex = '2';
+      el.style.borderRadius = '2px';
+      el.title = `Langsung skip ${type}`;
+      
+      progressEl.appendChild(el);
     };
 
-    const onWaiting = () => setIsBuffering(true);
-    const onSeeking = () => setIsBuffering(true);
-    const onPlaying = () => setIsBuffering(false);
-    const onCanPlay = () => setIsBuffering(false);
-    const onSeeked = () => setIsBuffering(false);
-    const onEndedEvent = () => {
-      setPlaying(false);
-      if (onEnded) onEnded(video.currentTime, video.duration);
-    };
+    if (intro) addRegion(intro.start, intro.end, 'intro');
+    if (outro) addRegion(outro.start, outro.end, 'outro');
 
-    video.addEventListener("play", onPlay);
-    video.addEventListener("pause", onPause);
-    video.addEventListener("timeupdate", onTimeupdate);
-    video.addEventListener("durationchange", onDurationChange);
-    video.addEventListener("progress", onProgress);
-    video.addEventListener("volumechange", onVolumeChange);
-    video.addEventListener("waiting", onWaiting);
-    video.addEventListener("seeking", onSeeking);
-    video.addEventListener("playing", onPlaying);
-    video.addEventListener("canplay", onCanPlay);
-    video.addEventListener("seeked", onSeeked);
-    video.addEventListener("ended", onEndedEvent);
-
-    return () => {
-      video.removeEventListener("play", onPlay);
-      video.removeEventListener("pause", onPause);
-      video.removeEventListener("timeupdate", onTimeupdate);
-      video.removeEventListener("durationchange", onDurationChange);
-      video.removeEventListener("progress", onProgress);
-      video.removeEventListener("volumechange", onVolumeChange);
-      video.removeEventListener("waiting", onWaiting);
-      video.removeEventListener("seeking", onSeeking);
-      video.removeEventListener("playing", onPlaying);
-      video.removeEventListener("canplay", onCanPlay);
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("ended", onEndedEvent);
-    };
-  }, [subCues, intro, outro, onTimeUpdate, onEnded]);
+    // Elevate the range input thumb so it stays visible/clickable over the highlights
+    const rangeInput = progressEl.querySelector('input[type="range"]');
+    if (rangeInput) {
+      rangeInput.style.zIndex = '3';
+      rangeInput.style.position = 'relative';
+    }
+  }, [duration, intro, outro]);
 
   // Translation gating
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    if (waitingForTranslation || isSubtitleLoading) {
-      video.pause();
+    if (waitingForTranslation) {
+      if (!video.paused) {
+        systemPauseRef.current = true;
+        video.pause();
+      }
     } else if (video.paused && playing) {
       video.play().catch(() => { });
     }
   }, [waitingForTranslation, isSubtitleLoading, playing]);
-
-  // ─── Controls auto-hide ──────────────────────────────────
-  const resetHideTimer = useCallback(() => {
-    setShowControls(true);
-    clearTimeout(hideTimerRef.current);
-
-    const hideDelay = isMobile ? 2000 : 0;
-
-    hideTimerRef.current = setTimeout(() => {
-      if (videoRef.current && !videoRef.current.paused) setShowControls(false);
-    }, 5000 + hideDelay);
-  }, [isMobile]);
-
-  useEffect(() => { resetHideTimer(); return () => clearTimeout(hideTimerRef.current); }, [resetHideTimer]);
-
-  // ─── Actions ──────────────────────────────────────────────
-  const togglePlay = () => {
-    if (waitingRef.current) return;
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) video.play().catch(() => { });
-    else video.pause();
-  };
-
-  const seek = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    if (videoRef.current) videoRef.current.currentTime = pct * duration;
-  };
-
-  const changeVolume = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    if (videoRef.current) {
-      videoRef.current.volume = pct;
-      videoRef.current.muted = false;
-    }
-  };
-
-  const toggleMute = () => {
-    if (videoRef.current) videoRef.current.muted = !videoRef.current.muted;
-  };
-
-  const toggleFullscreen = async () => {
-    const el = containerRef.current;
-    if (!el) return;
-
-    try {
-      if (document.fullscreenElement) {
-        if (screen.orientation && screen.orientation.unlock) {
-          screen.orientation.unlock();
-        }
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-      } else {
-        await el.requestFullscreen();
-        setIsFullscreen(true);
-
-        // Auto-rotate to landscape on mobile
-        if (isMobile && screen.orientation && screen.orientation.lock) {
-          try {
-            await screen.orientation.lock("landscape");
-          } catch (e) {
-            console.warn("Orientation lock failed:", e);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Fullscreen toggle failed:", err);
-    }
-  };
-
-  const handleQualityChange = (level) => {
-    if (hlsRef.current) hlsRef.current.currentLevel = level;
-    setCurrentQuality(level);
-    setShowQualityMenu(false);
-  };
-
-  const handleSpeedChange = (rate) => {
-    if (videoRef.current) videoRef.current.playbackRate = rate;
-    setPlaybackRate(rate);
-    setShowSpeedMenu(false);
-  };
-
-  const closeAllMenus = () => {
-    setShowQualityMenu(false);
-    setShowSpeedMenu(false);
-    setShowSubMenu(false);
-  };
-
-  const skipForward = () => { if (videoRef.current) videoRef.current.currentTime += 10; };
-  const skipBackward = () => { if (videoRef.current) videoRef.current.currentTime -= 10; };
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const onKey = (e) => {
-      if (
-        e.target.tagName === "INPUT" ||
-        e.target.tagName === "SELECT" ||
-        e.target.tagName === "TEXTAREA" ||
-        e.target.isContentEditable
-      ) return;
-      switch (e.key) {
-        case " ": case "k": e.preventDefault(); togglePlay(); break;
-        case "ArrowRight": e.preventDefault(); skipForward(); break;
-        case "ArrowLeft": e.preventDefault(); skipBackward(); break;
-        case "ArrowUp": e.preventDefault(); if (videoRef.current) videoRef.current.volume = Math.min(1, videoRef.current.volume + 0.1); break;
-        case "ArrowDown": e.preventDefault(); if (videoRef.current) videoRef.current.volume = Math.max(0, videoRef.current.volume - 0.1); break;
-        case "f": e.preventDefault(); toggleFullscreen(); break;
-        case "m": e.preventDefault(); toggleMute(); break;
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [duration]);
 
   // Fullscreen change detection
   useEffect(() => {
@@ -648,51 +770,13 @@ export default function Player({
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
-  const bufferedPct = duration > 0 ? (buffered / duration) * 100 : 0;
   const subCSS = buildSubtitleCSS(subStyle, isMobile);
-  const currentQualityLabel = qualities.find((q) => q.level === currentQuality)?.label || "Auto";
-
-  // Hanya tampilkan kontrol ekstra di PC atau HP pas mode Fullscreen
-  const showAdvancedControls = !isMobile || isFullscreen;
 
   return (
     <div
       ref={containerRef}
-      className="kol-player"
-      onMouseMove={!isMobile ? resetHideTimer : undefined}
-      onMouseLeave={() => playing && setShowControls(false)}
-      onClick={(e) => {
-        if (e.target !== e.currentTarget && e.target !== videoRef.current) return;
-
-        const now = Date.now();
-        const delta = now - lastClickTimeRef.current;
-        lastClickTimeRef.current = now;
-
-        if (isMobile) {
-          if (delta < 300) {
-            // Double tap: play/pause
-            clearTimeout(clickTimerRef.current);
-            togglePlay();
-            closeAllMenus();
-          } else {
-            // Single tap: toggle menu & auto-hide
-            clickTimerRef.current = setTimeout(() => {
-              if (showControls) {
-                setShowControls(false);
-                clearTimeout(hideTimerRef.current);
-              } else {
-                resetHideTimer();
-              }
-              closeAllMenus();
-            }, 300);
-          }
-        } else {
-          // Desktop behavior
-          togglePlay();
-          closeAllMenus();
-        }
-      }}
+      id={`kol-player-${playerId.replace(/:/g, '')}`}
+      className={`kol-player-wrapper ${isMobile && !isFullscreen ? 'kol-hide-settings' : ''} ${isVideoLoading && !waitingForTranslation ? 'kol-video-loading' : ''}`}
       style={{
         position: "relative",
         width: "100%",
@@ -700,19 +784,28 @@ export default function Player({
         background: "#000",
         borderRadius: isFullscreen ? 0 : "12px",
         overflow: "hidden",
-        cursor: showControls ? "default" : "none",
         userSelect: "none",
       }}
     >
-      {/* Video Element */}
+      {/* Video Element - Plyr wraps this */}
       <video
         ref={videoRef}
-        style={{ width: "100%", height: "100%", objectFit: "contain" }}
         playsInline
         preload="auto"
       />
 
-      {/* Custom Subtitles */}
+      {/* Video Loading Indicator (Library) */}
+      {isVideoLoading && !waitingForTranslation && (
+        <div style={{
+          position: "absolute", top: "50%", left: "50%", 
+          transform: "translate(-50%, -50%)",
+          zIndex: 5, pointerEvents: "none"
+        }}>
+          <PuffLoader color="var(--accent, #ec4899)" size={100} />
+        </div>
+      )}
+
+      {/* Custom Subtitles Overlay (on top of Plyr) */}
       {currentCueText && !waitingForTranslation && (
         <div
           style={{
@@ -723,7 +816,7 @@ export default function Player({
             padding: "0 24px",
             transition: "bottom 0.3s ease",
             pointerEvents: "none",
-            zIndex: 20,
+            zIndex: 100,
           }}
         >
           <span
@@ -739,7 +832,7 @@ export default function Player({
           onClick={(e) => { e.stopPropagation(); if (videoRef.current && intro) videoRef.current.currentTime = intro.end; }}
           style={{
             position: "absolute", bottom: showControls ? "80px" : "30px", right: "20px",
-            zIndex: 60, padding: "8px 20px", borderRadius: "8px",
+            zIndex: 110, padding: "8px 20px", borderRadius: "8px",
             background: "rgba(236,72,153,0.85)", backdropFilter: "blur(8px)",
             color: "#fff", border: "1px solid rgba(255,255,255,0.2)",
             fontSize: "13px", fontWeight: 700, cursor: "pointer",
@@ -756,7 +849,7 @@ export default function Player({
           onClick={(e) => { e.stopPropagation(); if (onNextEpisode) onNextEpisode(); }}
           style={{
             position: "absolute", bottom: showControls ? "80px" : "30px", right: "20px",
-            zIndex: 60, padding: "8px 20px", borderRadius: "8px",
+            zIndex: 110, padding: "8px 20px", borderRadius: "8px",
             background: "rgba(99,102,241,0.85)", backdropFilter: "blur(8px)",
             color: "#fff", border: "1px solid rgba(255,255,255,0.2)",
             fontSize: "13px", fontWeight: 700, cursor: "pointer",
@@ -768,43 +861,14 @@ export default function Player({
       )}
 
       {/* Premium Translation Overlay */}
-      {(waitingForTranslation || isSubtitleLoading) && (
+      {waitingForTranslation && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 999,
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", gap: "24px",
           transition: "all 0.4s ease",
         }}>
-          <div style={{ position: "relative", width: "100px", height: "100px" }}>
-            {/* Outer Glow */}
-            <div style={{
-              position: "absolute", inset: "-15px", borderRadius: "50%",
-              background: "radial-gradient(circle, rgba(236,72,153,0.3) 0%, transparent 70%)",
-              animation: "pulse 2s infinite ease-in-out"
-            }} />
-
-            {/* Rotating Rings */}
-            <div style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              border: "3px solid transparent", borderTopColor: "#ec4899",
-              animation: "spin 1s linear infinite"
-            }} />
-            <div style={{
-              position: "absolute", inset: "10px", borderRadius: "50%",
-              border: "2px solid transparent", borderBottomColor: "#6366f1",
-              animation: "spin 1.5s linear infinite reverse"
-            }} />
-
-            {/* Center Logo/Icon */}
-            <div style={{
-              position: "absolute", inset: "25px", borderRadius: "50%",
-              background: "rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "center",
-              backdropFilter: "blur(4px)", border: "1px solid rgba(255,255,255,0.1)",
-              animation: "pulse 1.5s infinite"
-            }}>
-              <span style={{ fontSize: "28px", filter: "drop-shadow(0 0 10px rgba(236,72,153,0.5))" }}>🤖</span>
-            </div>
-          </div>
+          <PuffLoader color="var(--accent, #ec4899)" size={100} />
 
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", textAlign: "center" }}>
             <h3 style={{
@@ -827,353 +891,15 @@ export default function Player({
 
           <style dangerouslySetInnerHTML={{
             __html: `
-            @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-            @keyframes pulse { 0%, 100% { opacity: 0.5; transform: scale(1); } 50% { opacity: 0.8; transform: scale(1.05); } }
             @keyframes dotMove { 0% { opacity: 0.2; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } 100% { opacity: 0.2; transform: translateY(0); } }
             .dot-animate { display: inline-block; color: #ec4899; animation: dotMove 1s infinite; }
           `}} />
         </div>
       )}
 
-      {/* ═══ Controls Layer ═══ */}
-      <div
-        style={{
-          position: "absolute", bottom: 0, left: 0, right: 0,
-          background: "linear-gradient(transparent, rgba(0,0,0,0.85))",
-          padding: "40px 16px 12px",
-          opacity: showControls ? 1 : 0,
-          transition: "opacity 0.3s ease",
-          pointerEvents: showControls ? "auto" : "none",
-          zIndex: 50,
-        }}
-      >
-        {/* Progress Bar */}
-        <div
-          onClick={seek}
-          style={{ width: "100%", height: "6px", background: "rgba(255,255,255,0.15)", borderRadius: "3px", cursor: "pointer", marginBottom: "10px", position: "relative" }}
-        >
-          {/* Intro Marker */}
-          {intro && duration > 0 && (
-            <div style={{
-              position: "absolute",
-              left: `${(intro.start / duration) * 100}%`,
-              width: `${((intro.end - intro.start) / duration) * 100}%`,
-              height: "100%",
-              background: "rgba(236, 72, 153, 0.4)",
-              borderRadius: "3px",
-              zIndex: 1
-            }} />
-          )}
-          {/* Outro Marker */}
-          {outro && duration > 0 && (
-            <div style={{
-              position: "absolute",
-              left: `${(outro.start / duration) * 100}%`,
-              width: `${((outro.end - outro.start) / duration) * 100}%`,
-              height: "100%",
-              background: "rgba(99, 102, 241, 0.4)",
-              borderRadius: "3px",
-              zIndex: 1
-            }} />
-          )}
-          {/* Buffered */}
-          <div style={{ position: "absolute", height: "100%", borderRadius: "3px", background: "rgba(255,255,255,0.2)", width: `${bufferedPct}%` }} />
-          {/* Progress */}
-          <div style={{ position: "absolute", height: "100%", borderRadius: "3px", background: "linear-gradient(90deg, #ec4899, #6366f1)", width: `${progressPct}%`, transition: "width 0.1s linear", zIndex: 2 }}>
-            <div style={{
-              position: "absolute", right: "-6px", top: "-3px",
-              width: "12px", height: "12px", borderRadius: "50%",
-              background: "#ec4899", border: "2px solid #fff",
-              boxShadow: "0 0 8px rgba(236,72,153,0.6)",
-            }} />
-          </div>
-        </div>
 
-        {/* Controls Row */}
-        <div style={{ display: "flex", alignItems: "center", gap: isMobile ? "4px" : "8px" }}>
-          {/* Play/Pause */}
-          <button onClick={togglePlay} style={{ ...iconBtnStyle, width: isMobile ? "36px" : "40px", height: isMobile ? "36px" : "40px" }} title={playing ? "Pause (K)" : "Play (K)"}>
-            {playing ? (
-              <svg width={isMobile ? "18" : "20"} height={isMobile ? "18" : "20"} viewBox="0 0 24 24" fill="white"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" /></svg>
-            ) : (
-              <svg width={isMobile ? "18" : "20"} height={isMobile ? "18" : "20"} viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg>
-            )}
-          </button>
 
-          {/* Skip Back */}
-          {showAdvancedControls && (
-            <button onClick={skipBackward} style={iconBtnStyle} title="Rewind 10s (←)">
-              <svg width={isMobile ? "16" : "18"} height={isMobile ? "16" : "18"} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" /><text x="12" y="15.5" fontSize="8" fill="white" textAnchor="middle" fontWeight="bold">10</text></svg>
-            </button>
-          )}
-
-          {/* Skip Forward */}
-          {showAdvancedControls && (
-            <button onClick={skipForward} style={iconBtnStyle} title="Forward 10s (→)">
-              <svg width={isMobile ? "16" : "18"} height={isMobile ? "16" : "18"} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M23 4v6h-6" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" /><text x="12" y="15.5" fontSize="8" fill="white" textAnchor="middle" fontWeight="bold">10</text></svg>
-            </button>
-          )}
-
-          {/* Volume */}
-          {!isMobile && (
-            <>
-              <button onClick={toggleMute} style={iconBtnStyle} title="Mute (M)">
-                {muted || volume === 0 ? (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
-                ) : (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M11 5L6 9H2v6h4l5 4V5z" /><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" /></svg>
-                )}
-              </button>
-              <div
-                onClick={changeVolume}
-                style={{ width: "60px", height: "4px", background: "rgba(255,255,255,0.2)", borderRadius: "2px", cursor: "pointer", position: "relative" }}
-              >
-                <div style={{ height: "100%", borderRadius: "2px", background: "#ec4899", width: `${(muted ? 0 : volume) * 100}%` }} />
-              </div>
-            </>
-          )}
-
-          {/* Time */}
-          <span style={{ fontSize: isMobile ? "10px" : "12px", color: "rgba(255,255,255,0.7)", fontFamily: "monospace", marginLeft: "4px", whiteSpace: "nowrap" }}>
-            {formatTime(currentTime)} / {formatTime(duration)}
-          </span>
-
-          {/* Spacer */}
-          <div style={{ flex: 1 }} />
-
-          {/* Subtitle Menu */}
-          <div style={{ position: "relative" }}>
-            <button onClick={() => {
-              const next = !showSubMenu;
-              closeAllMenus();
-              setShowSubMenu(next);
-              setShowStylePanel(false);
-            }} style={iconBtnStyle} title="Subtitles">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={activeSub ? "#ec4899" : "white"} strokeWidth="2"><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M6 12h4M14 12h4M6 16h8" /></svg>
-            </button>
-            {showSubMenu && (
-              <div style={menuStyle}>
-                <div style={menuTitleStyle}>Subtitle</div>
-                <div style={{ maxHeight: isMobile ? "120px" : "200px", overflowY: "auto" }}>
-                  <button onClick={() => { handleActiveSubChange(null); setShowSubMenu(false); }} style={menuItemStyle(activeSub === null)}>Off</button>
-                  {tracks.map((t, i) => (
-                    <button key={i} onClick={() => { handleActiveSubChange(t); setShowSubMenu(false); }} style={menuItemStyle(activeSub?.file === t.file)}>
-                      {t.label || `Track ${i + 1}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Subtitle Style */}
-          {showAdvancedControls && (
-            <button onClick={() => {
-              const next = !showStylePanel;
-              closeAllMenus();
-              setShowStylePanel(next);
-            }} style={iconBtnStyle} title="Subtitle Style">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M4 6h16M4 12h10M4 18h6" /></svg>
-            </button>
-          )}
-
-          {/* Quality Menu */}
-          {qualities.length > 0 && (
-            <div style={{ position: "relative" }}>
-              <button onClick={() => {
-                const next = !showQualityMenu;
-                closeAllMenus();
-                setShowQualityMenu(next);
-                setShowStylePanel(false);
-              }} style={{ ...iconBtnStyle, fontSize: "11px", fontWeight: 700, color: "#ec4899" }} title="Quality">
-                {currentQualityLabel}
-              </button>
-              {showQualityMenu && (
-                <div style={menuStyle}>
-                  <div style={menuTitleStyle}>Quality {isPremium ? '💎' : '🔒'}</div>
-                  <div style={{ maxHeight: isMobile ? "120px" : "200px", overflowY: "auto" }}>
-                    {qualities.map((q) => (
-                      <button key={q.level} onClick={() => handleQualityChange(q.level)} style={menuItemStyle(currentQuality === q.level)}>
-                        {q.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Speed Menu */}
-          {showAdvancedControls && (
-            <div style={{ position: "relative" }}>
-              <button onClick={() => {
-                const next = !showSpeedMenu;
-                closeAllMenus();
-                setShowSpeedMenu(next);
-                setShowStylePanel(false);
-              }} style={{ ...iconBtnStyle, fontSize: "11px", fontWeight: 700, color: playbackRate !== 1 ? "#ec4899" : "#fff" }} title="Playback Speed">
-                {playbackRate}x
-              </button>
-              {showSpeedMenu && (
-                <div style={menuStyle}>
-                  <div style={menuTitleStyle}>Speed</div>
-                  <div style={{ maxHeight: isMobile ? "120px" : "200px", overflowY: "auto" }}>
-                    {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => (
-                      <button key={r} onClick={() => handleSpeedChange(r)} style={menuItemStyle(playbackRate === r)}>
-                        {r}x {r === 1 ? "(Normal)" : ""}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Fullscreen */}
-          <button onClick={toggleFullscreen} style={iconBtnStyle} title="Fullscreen (F)">
-            {isFullscreen ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3" /></svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* ═══ Subtitle Style Panel ═══ */}
-      {showStylePanel && !waitingForTranslation && showAdvancedControls && (
-        <div style={{
-          position: "absolute",
-          bottom: isFullscreen ? "90px" : "70px",
-          right: isFullscreen ? "24px" : "12px",
-          zIndex: 200,
-          background: "rgba(10,10,20,0.95)", border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: "12px", padding: "16px",
-          width: isMobile ? "240px" : "270px",
-          maxHeight: isFullscreen ? "calc(100vh - 120px)" : "calc(100% - 80px)",
-          overflowY: "auto",
-          paddingBottom: "24px",
-          backdropFilter: "blur(16px)", boxShadow: "0 8px 32px rgba(0,0,0,0.8)",
-          color: "#fff", fontFamily: "Inter, sans-serif",
-        }}>
-
-          {/* Header */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-            <span style={{ fontWeight: 700, fontSize: "13px", letterSpacing: "0.05em" }}>⚙️ Subtitle Style</span>
-            <button onClick={() => setShowStylePanel(false)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.5)", cursor: "pointer", fontSize: "16px", lineHeight: 1 }}>✕</button>
-          </div>
-
-          {/* Font Size Desktop */}
-          {!isMobile && (
-            <div style={{ marginBottom: "12px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "rgba(255,255,255,0.5)", marginBottom: "4px" }}>
-                <span>Ukuran Font (PC)</span>
-                <span style={{ color: "#ec4899", fontWeight: 600 }}>{subStyle.fontSize}px</span>
-              </div>
-              <input type="range" min="14" max="48" step="2" value={subStyle.fontSize}
-                onChange={(e) => updateStyle("fontSize", e.target.value)}
-                style={{ width: "100%", accentColor: "#ec4899" }} />
-            </div>
-          )}
-
-          {/* Font Size Mobile */}
-          {isMobile && (
-            <div style={{ marginBottom: "12px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "rgba(255,255,255,0.5)", marginBottom: "4px" }}>
-                <span>Ukuran Font (HP)</span>
-                <span style={{ color: "#ec4899", fontWeight: 600 }}>{subStyle.mobileFontSize || 16}px</span>
-              </div>
-              <input type="range" min="10" max="24" step="1" value={subStyle.mobileFontSize || 16}
-                onChange={(e) => updateStyle("mobileFontSize", e.target.value)}
-                style={{ width: "100%", accentColor: "#ec4899" }} />
-            </div>
-          )}
-
-          {/* Text Color */}
-          <div style={{ marginBottom: "12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: "11px", color: "rgba(255,255,255,0.5)" }}>Warna Teks</span>
-            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-              {["#ffffff", "#ffeb3b", "#00e5ff", "#69ff47", "#ff4081"].map((c) => (
-                <button key={c} onClick={() => updateStyle("color", c)}
-                  style={{ width: "20px", height: "20px", borderRadius: "50%", background: c, border: subStyle.color === c ? "2px solid #ec4899" : "2px solid transparent", cursor: "pointer", flexShrink: 0 }} />
-              ))}
-              <input type="color" value={subStyle.color}
-                onChange={(e) => updateStyle("color", e.target.value)}
-                style={{ width: "24px", height: "24px", borderRadius: "4px", border: "none", cursor: "pointer", padding: 0, background: "none" }} />
-            </div>
-          </div>
-
-          {/* Font Family */}
-          <div style={{ marginBottom: "12px" }}>
-            <div style={{ fontSize: "11px", color: "rgba(255,255,255,0.5)", marginBottom: "4px" }}>Font</div>
-            <select value={subStyle.fontFamily}
-              onChange={(e) => updateStyle("fontFamily", e.target.value)}
-              style={{ width: "100%", background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px", color: "#fff", fontSize: "12px", padding: "5px 8px", cursor: "pointer" }}>
-              {FONT_OPTIONS.map((f) => (
-                <option key={f.value} value={f.value} style={{ background: "#1a1a2e" }}>{f.label}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Outline Strength */}
-          <div style={{ marginBottom: "12px" }}>
-            <div style={{ fontSize: "11px", color: "rgba(255,255,255,0.5)", marginBottom: "6px" }}>Gaya Outline</div>
-            <div style={{ display: "flex", gap: "6px" }}>
-              {[["none", "Tidak Ada"], ["soft", "Lembut"], ["strong", "Tebal"]].map(([v, l]) => (
-                <button key={v} onClick={() => updateStyle("outlineStrength", v)}
-                  style={{
-                    flex: 1, padding: "5px 0", borderRadius: "6px", fontSize: "11px", border: "1px solid",
-                    borderColor: subStyle.outlineStrength === v ? "#ec4899" : "rgba(255,255,255,0.12)",
-                    background: subStyle.outlineStrength === v ? "rgba(236,72,153,0.2)" : "rgba(255,255,255,0.05)",
-                    color: subStyle.outlineStrength === v ? "#ec4899" : "rgba(255,255,255,0.6)",
-                    cursor: "pointer", fontWeight: 600,
-                  }}>
-                  {l}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Background Opacity */}
-          <div style={{ marginBottom: "14px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "rgba(255,255,255,0.5)", marginBottom: "4px" }}>
-              <span>Latar Belakang</span>
-              <span style={{ color: "#ec4899", fontWeight: 600 }}>{subStyle.bgOpacity}%</span>
-            </div>
-            <input type="range" min="0" max="80" step="10" value={subStyle.bgOpacity}
-              onChange={(e) => updateStyle("bgOpacity", e.target.value)}
-              style={{ width: "100%", accentColor: "#ec4899" }} />
-          </div>
-
-          {/* Reset */}
-          <button
-            onClick={() => { saveSubtitleStyle(DEFAULT_SUBTITLE_STYLE); setSubStyle(DEFAULT_SUBTITLE_STYLE); }}
-            style={{ marginTop: "10px", width: "100%", padding: "6px", borderRadius: "6px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.5)", fontSize: "12px", cursor: "pointer" }}>
-            Reset ke Default
-          </button>
-        </div>
-      )}
-
-      {/* Big center play button when paused */}
-      {!playing && !waitingForTranslation && (
-        <div onClick={togglePlay} style={{
-          position: "absolute", inset: 0,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          zIndex: 15, cursor: "pointer",
-        }}>
-          <div style={{
-            width: "64px", height: "64px", borderRadius: "50%",
-            background: "rgba(236,72,153,0.8)", backdropFilter: "blur(8px)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 0 30px rgba(236,72,153,0.4)",
-            transition: "transform 0.2s ease",
-          }}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg>
-          </div>
-        </div>
-      )}
-
-      {/* CSS Animations */}
+      {/* CSS Animations & Plyr Theme Override */}
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -1181,41 +907,110 @@ export default function Player({
           from { opacity: 0; transform: translateX(20px); }
           to { opacity: 1; transform: translateX(0); }
         }
-        .kol-player:fullscreen { border-radius: 0; }
-        .kol-player video::-webkit-media-controls { display: none !important; }
+
+        /* Blur ONLY the video wrapper, not the controls */
+        .kol-player-wrapper.kol-video-loading .plyr__video-wrapper {
+          filter: blur(4px) brightness(0.6);
+          transition: filter 0.3s ease;
+        }
+
+        /* ═══ Plyr Kolektaku Theme ═══ */
+        .kol-player-wrapper .plyr {
+          --plyr-color-main: var(--accent);
+          --plyr-video-background: #000;
+          --plyr-menu-background: var(--bg-card);
+          --plyr-menu-color: var(--text-primary);
+          --plyr-menu-border-color: var(--border);
+          --plyr-menu-radius: 10px;
+          --plyr-menu-shadow: var(--shadow-xl);
+          --plyr-badge-background: var(--accent);
+          --plyr-badge-text-color: #fff;
+          --plyr-badge-border-radius: 4px;
+          --plyr-control-icon-size: 18px;
+          --plyr-control-spacing: 10px;
+          --plyr-font-size-base: 15px;
+          --plyr-font-size-small: 13px;
+          --plyr-font-size-large: 18px;
+          --plyr-font-size-xlarge: 21px;
+          --plyr-font-size-time: 13px;
+          --plyr-font-weight-bold: 700;
+          --plyr-font-weight-regular: 500;
+          --plyr-tooltip-background: var(--bg-card);
+          --plyr-tooltip-color: var(--text-primary);
+          --plyr-tooltip-radius: 6px;
+          --plyr-tooltip-shadow: var(--shadow-md);
+          --plyr-font-family: Inter, sans-serif;
+          --plyr-range-fill-background: linear-gradient(90deg, var(--accent), var(--accent-hover, #6366f1));
+          --plyr-video-control-background-hover: var(--accent-muted, rgba(236,72,153,0.15));
+          --plyr-video-controls-background: linear-gradient(transparent, rgba(0,0,0,0.85));
+          border-radius: inherit;
+          overflow: hidden;
+          z-index: 0;
+          position: relative;
+        }
+
+        .kol-player-wrapper .plyr__control--overlaid {
+          background: var(--accent) !important;
+          backdrop-filter: blur(8px);
+          box-shadow: 0 0 30px var(--accent-muted, rgba(236,72,153,0.4));
+          border: none;
+        }
+
+        .kol-player-wrapper .plyr__control--overlaid:hover {
+          background: var(--accent-hover, #ec4899) !important;
+        }
+
+        /* Responsive Controls layout tweaking */
+        .kol-player-wrapper .plyr__controls {
+          padding-bottom: 15px;
+        }
+
+        /* Menu layout for mobile */
+        .kol-player-wrapper .plyr__menu__container [id*="captions"] {
+          max-height: 50vh;
+          overflow-y: auto;
+        }
+
+        /* Hide setting button on mobile unless fullscreen */
+        .kol-player-wrapper.kol-hide-settings .plyr__controls [data-plyr="settings"] {
+          display: none !important;
+        }
+
+        /* Hide TRACK badges in captions menu */
+        .kol-player-wrapper .plyr__menu__container .plyr__menu__value {
+          display: none !important;
+        }
+
+        .kol-player-wrapper .plyr__menu__container .plyr__control[role="menuitemradio"]::before {
+          background: var(--accent);
+        }
+
+        .kol-player-wrapper .plyr__control.plyr__tab-focus,
+        .kol-player-wrapper .plyr__control:hover {
+          background: var(--bg-card-hover, rgba(236,72,153,0.15)) !important;
+          color: var(--text-primary) !important;
+        }
+
+        .kol-player-wrapper .plyr--fullscreen-fallback { border-radius: 0; }
+        .kol-player-wrapper .plyr:fullscreen { border-radius: 0; }
+        .kol-player-wrapper .plyr video::-webkit-media-controls { display: none !important; }
+
+        /* Fullscreen: wrapper is the fullscreen container, so ensure overlays are visible */
+        .kol-player-wrapper:fullscreen,
+        .kol-player-wrapper.plyr--fullscreen-active {
+          background: #000;
+        }
+        .kol-player-wrapper:fullscreen .plyr,
+        .kol-player-wrapper.plyr--fullscreen-active .plyr {
+          height: 100%;
+          width: 100%;
+        }
+
+        /* Hide Plyr's native captions since we handle subtitles custom */
+        .kol-player-wrapper .plyr__captions { display: none !important; }
       `}</style>
     </div>
   );
 }
 
-// Shared styles
-const iconBtnStyle = {
-  background: "none", border: "none", color: "#fff",
-  cursor: "pointer", padding: "4px", display: "flex",
-  alignItems: "center", justifyContent: "center",
-  borderRadius: "4px", transition: "background 0.2s",
-};
 
-const menuStyle = {
-  position: "absolute", bottom: "36px", right: 0,
-  background: "rgba(10,10,20,0.95)", border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: "10px", padding: "6px",
-  minWidth: "140px",
-  maxWidth: "200px",
-  backdropFilter: "blur(16px)", boxShadow: "0 8px 32px rgba(0,0,0,0.8)",
-  zIndex: 100,
-};
-
-const menuTitleStyle = {
-  fontSize: "10px", fontWeight: 700, color: "rgba(255,255,255,0.4)",
-  padding: "4px 10px", textTransform: "uppercase", letterSpacing: "0.1em",
-};
-
-const menuItemStyle = (active) => ({
-  display: "block", width: "100%", textAlign: "left",
-  padding: "6px 10px", borderRadius: "6px", border: "none",
-  background: active ? "rgba(236,72,153,0.2)" : "transparent",
-  color: active ? "#ec4899" : "#fff",
-  fontSize: "12px", fontWeight: active ? 700 : 500,
-  cursor: "pointer", transition: "background 0.15s",
-});
